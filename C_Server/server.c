@@ -7,6 +7,12 @@
 #define PORT 8081
 #define BUF_SIZE 1024
 
+typedef struct
+{
+    float temp;
+    float hum;
+} DHTData;
+
 typedef enum
 {
     GET = 1,
@@ -59,9 +65,9 @@ typedef union
 } Header;
 
 Header coapHeader;
-Header responseHeader;
 Token coapToken;
 Code coapCode;
+DHTData dhtData = {0, 0};
 
 void error_handling(const char *message)
 {
@@ -69,7 +75,7 @@ void error_handling(const char *message)
     exit(1);
 }
 
-void decodeCoAPMessage(char *message, int message_length)
+void decodeCoAPMessage(char *message, int message_length, DHTData *dhtData)
 {
     // Assuming CoAP message structure is the same as defined in the Arduino code
     if (message_length < 4)
@@ -77,48 +83,114 @@ void decodeCoAPMessage(char *message, int message_length)
         printf("Invalid CoAP message length\n");
         return;
     }
-
-    // Extract CoAP header
     memcpy(coapHeader.bytes, message, 4);
-
-    // Extract CoAP version
-    uint8_t version = coapHeader.header.ver;
-    printf("CoAP Version: %u\n", version);
-
-    // Extract CoAP type
-    CoAPMessageType type = (CoAPMessageType)coapHeader.header.type;
-    printf("CoAP Type: %u\n", type);
-
-    // Extract CoAP token length
-    uint8_t tokenLength = coapHeader.header.tkl;
-    printf("CoAP Token Length: %u\n", tokenLength);
-
-    // Extract CoAP code
     coapCode.code_class = coapHeader.header.code >> 5;
     coapCode.detail = coapHeader.header.code & 0x1F;
-    printf("CoAP Code Class: %u\n", coapCode.code_class);
-    printf("CoAP Code Detail: %u\n", coapCode.detail);
 
-    // Extract CoAP message ID
+    if (coapHeader.header.tkl > 0)
+    {
+        memcpy(coapToken.tokens, message + 4, coapHeader.header.tkl);
+    }
+
+    if (message_length > 4 + coapHeader.header.tkl + 1)
+    {
+        char *data = message + 4 + coapHeader.header.tkl + 1;
+        memcpy(&dhtData->temp, data, sizeof(float));
+        memcpy(&dhtData->hum, data + sizeof(float), sizeof(float));
+    }
+    printf("Packet size : %d bytes\n", message_length);
+}
+
+void displayData()
+{
     uint16_t messageId = coapHeader.header.msg_id;
-    printf("CoAP Message ID: %u\n", messageId);
-
-    // Extract CoAP token
-    if (tokenLength > 0)
+    char *type;
+    switch (coapHeader.header.type)
     {
-        memcpy(coapToken.tokens, message + 4, tokenLength);
-        printf("CoAP Token: ");
-        for (int i = 0; i < tokenLength; i++)
+    case CON:
+        type = "CON";
+        break;
+    case NON:
+        type = "NON";
+        break;
+    case ACK:
+        type = "ACK";
+        break;
+    case RST:
+        type = "RST";
+        break;
+
+    default:
+        break;
+    }
+
+    char *code_class;
+    switch (coapCode.code_class)
+    {
+    case REQUEST:
+        code_class = "REQ";
+        break;
+    case SUCESS_RESPONSE:
+        code_class = "SUC_RES";
+        break;
+    case CLIENT_ERROR_RESPONSE:
+        code_class = "CLI_ERR_RES";
+        break;
+    case SERVER_ERROR_RESPONSE:
+        code_class = "SER_ERR_RES";
+        break;
+
+    default:
+        break;
+    }
+
+    char *detail;
+    switch (coapCode.detail)
+    {
+    case GET:
+        detail = "GET";
+        break;
+    case POST:
+        detail = "POST";
+        break;
+    case PUT:
+        detail = "PUT";
+        break;
+    case DELETE:
+        detail = "DELETE";
+        break;
+
+    default:
+        break;
+    }
+    printf("---------------------------------------------------------------------------------------------------------\n");
+    printf("CoAP Header => |  ");
+    printf("Version : %d | ", coapHeader.header.ver);
+    printf("Type : %s | ", type);
+    printf("Token Length : %d | ", coapHeader.header.tkl);
+    printf("Code : %s  [%s] | ", code_class, detail);
+    printf("Message ID : %d |\n", messageId);
+    printf("---------------------------------------------------------------------------------------------------------\n");
+    if (coapHeader.header.tkl > 0)
+    {
+        printf("------------------\n");
+        printf("Token => |  ");
+        for (int i = 0; i < coapHeader.header.tkl; i++)
         {
-            printf("%02X ", coapToken.tokens[i]);
+            printf("0x%02X |\n", coapToken.tokens[i]);
         }
-        printf("\n");
+        printf("------------------\n");
+    }
+    if (dhtData.temp != 0 || dhtData.hum != 0)
+    {
+
+        printf("---------------------------------------------------------\n");
+        printf("Payload => | ");
+        printf("Temperature : %.2f C | ", dhtData.temp);
+        printf("Humidity : %.2f %% |\n", dhtData.hum);
+        printf("---------------------------------------------------------\n");
     }
 
-    if (message_length > 4 + tokenLength + 1)
-    {
-        printf("CoAP Payload: %.*s\n", message_length - (4 + tokenLength), message + 4 + tokenLength);
-    }
 }
 
 int main()
@@ -151,32 +223,39 @@ int main()
                                (struct sockaddr *)&clnt_addr, &clnt_addr_sz);
         if (str_len < 0)
             error_handling("recvfrom() error");
-
+        Header responseHeader;
         // Decode received CoAP message here
         // Parse message according to CoAP protocol and print relevant information
-        decodeCoAPMessage(message, str_len);
-        printf("Received data from ESP32: %.*s\n", str_len, message);
-        if (coapCode.code_class == REQUEST)
+        printf("Data packet arrived from ESP32 \n");
+        decodeCoAPMessage(message, str_len, &dhtData);
+        if (coapHeader.header.type == CON && coapCode.code_class == REQUEST)
         {
+            displayData();
             responseHeader.header.ver = coapHeader.header.ver;
             responseHeader.header.type = ACK;
             responseHeader.header.tkl = coapHeader.header.tkl;
-            responseHeader.header.code = 2 << 5 | coapCode.detail;
+            responseHeader.header.code = coapCode.code_class | coapCode.detail;
             responseHeader.header.msg_id = coapHeader.header.msg_id;
             sendto(serv_sock, responseHeader.bytes, 4, 0, (struct sockaddr *)&clnt_addr, clnt_addr_sz);
-            printf("Received CoAP request\n");
         }
-        else if (coapCode.code_class == SUCESS_RESPONSE)
+        else if (coapHeader.header.type == ACK && coapCode.code_class == SUCESS_RESPONSE)
         {
-            printf("Received CoAP success response\n");
+            displayData();
+            responseHeader.header.ver = coapHeader.header.ver;
+            responseHeader.header.type = ACK;
+            responseHeader.header.tkl = coapHeader.header.tkl;
+            responseHeader.header.code = 2 << 5 | GET;
+            responseHeader.header.msg_id = coapHeader.header.msg_id;
+            sendto(serv_sock, responseHeader.bytes, 4, 0, (struct sockaddr *)&clnt_addr, clnt_addr_sz);
         }
-        else if (coapCode.code_class == CLIENT_ERROR_RESPONSE)
+        else if(coapHeader.header.type == NON)
         {
-            printf("Received CoAP client error response\n");
+            displayData();
         }
-        else if (coapCode.code_class == SERVER_ERROR_RESPONSE)
+        else if (coapHeader.header.type == RST)
         {
-            printf("Received CoAP server error response\n");
+            dhtData.temp = 0;
+            dhtData.hum = 0;
         }
     }
 
